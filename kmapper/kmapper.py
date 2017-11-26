@@ -10,6 +10,8 @@ import numpy as np
 from sklearn import cluster, preprocessing, manifold, decomposition
 from scipy.spatial import distance
 
+from scipy.sparse.csgraph import csgraph_from_dense, connected_components
+
 
 class Cover():
     """Helper class that defines the default covering scheme
@@ -578,3 +580,51 @@ class KeplerMapper(object):
             return cluster_members_data
         else:
             return np.array([])
+
+    def get_graph_matrix(self, graph):
+        """ Returns the sparse graph matrix representation of the mapper graph
+
+        Input: complex. Dictionary. The resulting dictionary after applying map()
+        Output: sparse graph matrix in Compressed Sparse Row format
+        """
+        nodes = list( graph['nodes'].keys())
+        links = graph['links']
+        n = len(nodes)
+        g_dense = np.zeros((n, n))
+        for i, node in enumerate(nodes):
+            # get all nodes connected to node
+            conn_nodes = links[node]
+            for c_node in conn_nodes:
+                # first need to find index
+                j = nodes.index(c_node)
+                g_dense[i, j] = 1
+        g_sparse = csgraph_from_dense(g_dense)
+        return g_sparse
+
+
+
+    def get_component_labels(self, data, graph):
+        """ Returns component labels for the elements of X
+
+        Input: data. Numpy array. Original dataset
+               graph. Dictionary. The resulting dictionary after applying map()
+        Output: labels as Numpy array
+        """
+        node_dict = graph['nodes']
+        link_dict = graph['links']
+
+        # Get the sparse graph matrix
+        g_sparse = self.get_graph_matrix(graph)
+        n_comp, Components = connected_components(g_sparse, directed=False)
+
+        nodes = list(node_dict.keys() )
+        labels = np.empty((len(data),))
+        # initialize with nan since not all elements of the data might be contained in a node
+        labels[:] = np.nan
+        for i, component in enumerate(Components):
+            node = nodes[i]
+            index_in_node = node_dict[node]
+            labels[index_in_node] = component
+        return labels
+
+
