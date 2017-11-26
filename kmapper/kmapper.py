@@ -248,6 +248,8 @@ class KeplerMapper(object):
 
         start = datetime.now()
 
+        self.projected_X = projected_X
+
         nodes = defaultdict(list)
         links = defaultdict(list)
         meta = defaultdict(list)
@@ -380,7 +382,9 @@ class KeplerMapper(object):
 
         return result
 
-    def visualize(self, complex, color_function="", path_html="mapper_visualization_output.html", title="My Data",
+    def visualize(self, complex, color_function=None, color_data=None, color_scale=30,
+                  size_function=None, size_data=None, size_scale = 2,
+                  path_html="mapper_visualization_output.html", title="My Data",
                   graph_link_distance=30, graph_gravity=0.1, graph_charge=-120, custom_tooltips=None, width_html=0,
                   height_html=0, show_tooltips=True, show_title=True, show_meta=True, save_file=True):
         """Turns the dictionary 'complex' in a html file with d3.js
@@ -390,8 +394,13 @@ class KeplerMapper(object):
 
         parameters
         ----------
-        color_function    	string. Not fully implemented. Default: "" (distance to origin)
-        path_html        		file path as string. Where to save the HTML page.
+        color_function    	function or string. function according which the elements of a cluster are colored
+                            string can be 'average_signal_cluster'
+        color_data          Numpy array. data to which the color_function is applied to. Can be the original data
+                            or other related data (e.g. the signal)
+        size_function       function. function for custom size of nodes
+        size_data           Numpy array. data to which the size function is applied to
+        path_html        	file path as string. Where to save the HTML page.
         title          		string. HTML page document title and first heading.
         graph_link_distance  	int. Edge length.
         graph_gravity     	float. "Gravity" to center of layout.
@@ -410,26 +419,62 @@ class KeplerMapper(object):
         k2e = {}  # a key to incremental int dict, used for id's when linking
 
         meta_data = complex["meta_data"]
+        nodes = complex["nodes"]
 
-        for e, k in enumerate(complex["nodes"]):
+        for e, node in enumerate(nodes):
             # Tooltip and node color formatting, TODO: de-mess-ify
             if custom_tooltips is not None:
-                tooltip_s = "<h2>Cluster %s</h2> Contains %s members.<br>%s" % (k, len(
-                    complex["nodes"][k]), " ".join([str(f) for f in custom_tooltips[complex["nodes"][k]]]))
-                if color_function == "average_signal_cluster":
-                    tooltip_i = int(((sum([f for f in custom_tooltips[complex["nodes"][k]]]
-                                          ) / len(custom_tooltips[complex["nodes"][k]])) * 30))
-                    json_s["nodes"].append({"name": str(k), "tooltip": tooltip_s, "group": 2 * int(
-                        np.log(len(complex["nodes"][k]))), "color": str(tooltip_i)})
-                else:
-                    json_s["nodes"].append({"name": str(k), "tooltip": tooltip_s, "group": 2 * int(np.log(
-                        len(complex["nodes"][k]))), "color": str(complex["meta_nodes"][k]["coordinates"][0])})
+                tooltip_s = "<h2>Cluster %s</h2> Contains %s members.<br>%s" % (node, len(
+                    nodes[node]), " ".join([str(f) for f in custom_tooltips[nodes[node]]]))
             else:
                 tooltip_s = "<h2>Cluster %s</h2>Contains %s members." % (
-                    k, len(complex["nodes"][k]))
-                json_s["nodes"].append({"name": str(k), "tooltip": tooltip_s, "group": 2 * int(np.log(
-                    len(complex["nodes"][k]))), "color": str(complex["meta_nodes"][k]["coordinates"][0])})
-            k2e[k] = e
+                    node, len(nodes[node]))
+
+            # Color formatting
+            if color_function is not None:
+                if color_function == "average_signal_cluster":
+                    # TODO: some number other than 30?
+                    tooltip_i = int(((sum([f for f in custom_tooltips[nodes[node]]]
+                                          ) / len(custom_tooltips[nodes[node]])) * color_scale))
+                elif inspect.isfunction(color_function):
+
+                    elements_in_node = nodes[node]
+                    if color_data is not None:
+                        tooltip_i = int( color_function( color_data[elements_in_node] ) * color_scale )
+                    elif custom_tooltips is not None:
+                        color_data = custom_tooltips
+                        tooltip_i = int( color_function(color_data[elements_in_node]) * color_scale )
+                    else:
+                        # TODO: Should throw a warning
+                        tooltip_i = complex["meta_nodes"][node]["coordinates"][0]
+                else:
+                    tooltip_i = complex["meta_nodes"][node]["coordinates"][0]
+            else:
+                tooltip_i = complex["meta_nodes"][node]["coordinates"][0]
+
+            # Size formatting
+            if size_function is not None:
+                elements_in_node = nodes[node]
+                if size_data is not None:
+                    size_tooltip = size_scale * int( ( size_function( size_data[elements_in_node])) )
+                else:
+                    size_tooltip = size_scale *  int(  size_function(len(nodes[node])) )
+            else:
+                size_tooltip = size_scale * int( len(nodes[node]))
+
+            json_s["nodes"].append({"name": str(node), "tooltip": tooltip_s, "group": size_tooltip , "color": str(tooltip_i)})
+
+            k2e[node] = e
+
+        if inspect.isfunction(color_function):
+            color_function = color_function.__name__
+        if color_data is None and custom_tooltips is None:
+            color_data = meta_data["projection"]
+        elif color_data is not None:
+            color_data = 'color_data'
+        else:
+            color_data = 'custom_tooltips'
+
         for k in complex["links"]:
             for link in complex["links"][k]:
                 json_s["links"].append(
@@ -556,7 +601,7 @@ class KeplerMapper(object):
         .attr('style', function(d) { return 'width: ' + (d.group * 2) + 'px; height: ' + (d.group * 2) + 'px; ' + 'left: '+(d.x-(d.group))+'px; ' + 'top: '+(d.y-(d.group))+'px; background: '+color(d.color)+'; box-shadow: 0px 0px 3px #111; box-shadow: 0px 0px 33px '+color(d.color)+', inset 0px 0px 5px rgba(0, 0, 0, 0.2);'})
         ;
       });
-    </script>""" % (title, width_css, height_css, title_display, meta_display, tooltips_display, title, meta_data["projection"], meta_data['nr_cubes'], meta_data['overlap_perc'] * 100, color_function, meta_data["projection"], meta_data["clusterer"], meta_data["scaler"], width_js, height_js, graph_charge, graph_link_distance, graph_gravity, json.dumps(json_s))
+    </script>""" % (title, width_css, height_css, title_display, meta_display, tooltips_display, title, meta_data["projection"], meta_data['nr_cubes'], meta_data['overlap_perc'] * 100, color_function, color_data, meta_data["clusterer"], meta_data["scaler"], width_js, height_js, graph_charge, graph_link_distance, graph_gravity, json.dumps(json_s))
 
         if save_file:
             with open(path_html, "wb") as outfile:
