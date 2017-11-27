@@ -434,16 +434,22 @@ class KeplerMapper(object):
             if color_function is not None:
                 if color_function == "average_signal_cluster":
                     # TODO: some number other than 30?
-                    tooltip_i = int(((sum([f for f in custom_tooltips[nodes[node]]]
-                                          ) / len(custom_tooltips[nodes[node]])) * color_scale))
+                    average_signal = (sum([f for f in custom_tooltips[nodes[node]]]
+                                          ) / len(custom_tooltips[nodes[node]]) )
+                    tooltip_i = int( average_signal * color_scale)
+                    tooltip_s += "<br><h4>Color function:</h4> (%s , %s) " % ("average signal" , average_signal)
                 elif inspect.isfunction(color_function):
 
                     elements_in_node = nodes[node]
                     if color_data is not None:
-                        tooltip_i = int( color_function( color_data[elements_in_node] ) * color_scale )
+                        color = color_function( color_data[elements_in_node] )
+                        tooltip_i = int( color * color_scale )
+                        tooltip_s += "<br><h4>Color function:</h4> (%s , %s) " % ( color_function.__name__, color )
                     elif custom_tooltips is not None:
+                        color = color_function(color_data[elements_in_node])
                         color_data = custom_tooltips
-                        tooltip_i = int( color_function(color_data[elements_in_node]) * color_scale )
+                        tooltip_i = int( color * color_scale )
+                        tooltip_s += "<br><h4>Color function:</h4> (%s , %s) " % ( color_function.__name__, color )
                     else:
                         # TODO: Should throw a warning
                         tooltip_i = complex["meta_nodes"][node]["coordinates"][0]
@@ -453,12 +459,16 @@ class KeplerMapper(object):
                 tooltip_i = complex["meta_nodes"][node]["coordinates"][0]
 
             # Size formatting
-            if size_function is not None:
+            if inspect.isfunction(size_function):
                 elements_in_node = nodes[node]
                 if size_data is not None:
-                    size_tooltip = size_scale * int( ( size_function( size_data[elements_in_node])) )
+                    size = size_function( size_data[elements_in_node])
+                    size_tooltip = size_scale * int( size )
+                    tooltip_s += "<br><h4>Size function:</h4> (%s , %s) " % ( size_function.__name__, size )
                 else:
-                    size_tooltip = size_scale *  int(  size_function(len(nodes[node])) )
+                    size = size_function(len(nodes[node]))
+                    size_tooltip = size_scale *  int(  size )
+                    tooltip_s += "<br><h4>Size function:</h4> (%s , %s) " % ( size_function.__name__, size )
             else:
                 size_tooltip = size_scale * int( len(nodes[node]))
 
