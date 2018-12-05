@@ -48,7 +48,12 @@ __pycache__
 .cache
 build
 venv
+venv2
 *.egg-info
 MANIFEST
 setup.cfg
 dist
+*.pyc
+.pytest_cache
+.vscode
+.ipynb_checkpoints

@@ -1,172 +1,203 @@
 import pytest
 import numpy as np
 
-from kmapper import KeplerMapper
+import warnings
+from kmapper import KeplerMapper, Cover, cluster
 
-from kmapper.kmapper import Cover
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import Lasso
+from sklearn.manifold import MDS
+from scipy import sparse
+from scipy.spatial import distance
+from sklearn import neighbors
 
 
-class TestVisualize():
-    def test_visualize_standalone_same(self, tmpdir):
-        """ ensure that the visualization is not dependent on the actual mapper object.
-        """
+class TestLogging:
+    """ Simple tests that confirm map completes at each logging level
+    """
+
+    def test_runs_with_logging_0(self, capsys):
+        mapper = KeplerMapper(verbose=0)
+        data = np.random.rand(100, 2)
+        graph = mapper.map(data)
+
+        captured = capsys.readouterr()
+        assert captured[0] == ""
+
+    def test_runs_with_logging_1(self):
+        mapper = KeplerMapper(verbose=1)
+        data = np.random.rand(100, 2)
+        graph = mapper.map(data)
+
+    def test_runs_with_logging_2(self):
+        mapper = KeplerMapper(verbose=2)
+        data = np.random.rand(100, 2)
+        graph = mapper.map(data)
+
+    def test_logging_in_project(self, capsys):
+        mapper = KeplerMapper(verbose=2)
+        data = np.random.rand(100, 2)
+        lens = mapper.project(data)
+
+        captured = capsys.readouterr()
+        assert "Projecting on" in captured[0]
+
+    def test_logging_in_fit_transform(self, capsys):
+        mapper = KeplerMapper(verbose=2)
+        data = np.random.rand(100, 2)
+        lens = mapper.fit_transform(data)
+
+        captured = capsys.readouterr()
+        assert "Composing projection pipeline of length 1" in captured[0]
+
+
+class TestDataAccess:
+    def test_members_from_id(self):
+        mapper = KeplerMapper(verbose=1)
+        data = np.random.rand(100, 2)
+
+        ids = np.random.choice(10, 100)
+        data[ids] = 2
+
+        graph = mapper.map(data)
+        graph["nodes"]["new node"] = ids
+        mems = mapper.data_from_cluster_id("new node", graph, data)
+        np.testing.assert_array_equal(data[ids], mems)
+
+    def test_wrong_id(self):
+        mapper = KeplerMapper(verbose=1)
+        data = np.random.rand(100, 2)
+
+        graph = mapper.map(data)
+        mems = mapper.data_from_cluster_id("new node", graph, data)
+        np.testing.assert_array_equal(mems, np.array([]))
+
+
+class TestMap:
+    def test_simplices(self):
         mapper = KeplerMapper()
 
-        file = tmpdir.join('output.html')
+        X = np.random.rand(100, 2)
+        lens = mapper.fit_transform(X)
+        graph = mapper.map(
+            lens,
+            X=X,
+            cover=Cover(n_cubes=3, perc_overlap=1.5),
+            clusterer=cluster.DBSCAN(metric="euclidean", min_samples=3),
+        )
+        assert max([len(s) for s in graph["simplices"]]) <= 2
 
-        data = np.random.rand(1000, 10)
-        lens = mapper.fit_transform(data, projection=[0])
-        graph = mapper.map(lens, data)
-        viz1 = mapper.visualize(graph, path_html=file.strpath)
+        nodes = [n for n in graph["simplices"] if len(n) == 1]
+        edges = [n for n in graph["simplices"] if len(n) == 2]
+        assert len(nodes) == 3
+        assert len(edges) == 3
 
-        new_mapper = KeplerMapper()
-        viz2 = new_mapper.visualize(graph, path_html= file.strpath)
-
-        assert viz1 == viz2
-
-    def test_file_written(self, tmpdir):
+    def test_precomputed(self):
         mapper = KeplerMapper()
 
-        file = tmpdir.join('output.html')
+        X = np.random.rand(100, 2)
+        X_pdist = distance.squareform(distance.pdist(X, metric="euclidean"))
 
-        data = np.random.rand(1000, 10)
-        lens = mapper.fit_transform(data, projection=[0])
-        graph = mapper.map(lens, data)
-        viz = mapper.visualize(graph, path_html=file.strpath)
+        lens = mapper.fit_transform(X_pdist)
 
-        assert file.read() == viz
-        assert len(tmpdir.listdir()) == 1, "file was written to"
+        graph = mapper.map(
+            lens,
+            X=X_pdist,
+            cover=Cover(n_cubes=10, perc_overlap=0.8),
+            clusterer=cluster.DBSCAN(metric="precomputed", min_samples=3),
+            precomputed=True,
+        )
+        graph2 = mapper.map(
+            lens,
+            X=X,
+            cover=Cover(n_cubes=10, perc_overlap=0.8),
+            clusterer=cluster.DBSCAN(metric="euclidean", min_samples=3),
+        )
 
-    def test_file_not_written(self, tmpdir):
+        assert graph["links"] == graph2["links"]
+        assert graph["nodes"] == graph2["nodes"]
+        assert graph["simplices"] == graph2["simplices"]
+
+    def test_precomputed_with_knn_lens(self):
         mapper = KeplerMapper()
 
-        file = tmpdir.join('output.html')
+        X = np.random.rand(100, 5)
 
-        data = np.random.rand(1000, 10)
-        lens = mapper.fit_transform(data, projection=[0])
-        graph = mapper.map(lens, data)
-        viz = mapper.visualize(graph, path_html=file.strpath, save_file=False)
+        lens = mapper.fit_transform(
+            X, projection="knn_distance_3", distance_matrix="chebyshev"
+        )
+        assert lens.shape == (100, 1)
 
-        assert len(tmpdir.listdir()) == 0, "file was never written to"
-        # assert file.read() != viz
-
-class TestLinker():
-    def test_finds_a_link(self):
+    def test_affinity_prop_clustering(self):
         mapper = KeplerMapper()
 
-        groups = {"a": [1,2,3,4], "b":[1,2,3,4]}
-        links = mapper._create_links(groups)
+        X = np.random.rand(100, 2)
+        lens = mapper.fit_transform(X)
 
-        assert "a" in links or "b" in links
-        assert links["a"] == ["b"] or links["b"] == ["a"]
+        graph = mapper.map(lens, X, clusterer=cluster.AffinityPropagation())
 
-    def test_no_link(self):
+
+class TestLens:
+    # TODO: most of these tests only accommodate the default option. They need to be extended to incorporate all possible transforms.
+
+    # one test for each option supported
+    def test_str_options(self):
         mapper = KeplerMapper()
 
-        groups = {"a": [1,2,3,4], "b":[5,6,7]}
-        links = mapper._create_links(groups)
+        data = np.random.rand(100, 10)
 
-        assert not links
+        options = [
+            ["sum", np.sum],
+            ["mean", np.mean],
+            ["median", np.median],
+            ["max", np.max],
+            ["min", np.min],
+            ["std", np.std],
+            ["l2norm", np.linalg.norm],
+        ]
 
-    def test_pass_through_result(self):
+        first_point = data[0]
+        last_point = data[-1]
+        for tag, func in options:
+            lens = mapper.fit_transform(data, projection=tag, scaler=None)
+            np.testing.assert_almost_equal(lens[0][0], func(first_point))
+            np.testing.assert_almost_equal(lens[-1][0], func(last_point))
+
+        # For dist_mean, just make sure the code runs without breaking, not sure how to test this best
+        lens = mapper.fit_transform(data, projection="dist_mean", scaler=None)
+
+    def test_knn_distance(self):
+        mapper = KeplerMapper()
+        data = np.random.rand(100, 5)
+        lens = mapper.project(data, projection="knn_distance_4", scaler=None)
+
+        nn = neighbors.NearestNeighbors(n_neighbors=4)
+        nn.fit(data)
+        lens_confirm = np.sum(
+            nn.kneighbors(data, n_neighbors=4, return_distance=True)[0], axis=1
+        ).reshape((-1, 1))
+
+        assert lens.shape == (100, 1)
+        np.testing.assert_array_equal(lens, lens_confirm)
+
+    def test_distance_matrix(self):
+        # todo, test other distance_matrix functions
+        mapper = KeplerMapper(verbose=4)
+        X = np.random.rand(100, 10)
+        lens = mapper.fit_transform(X, distance_matrix="euclidean")
+
+        X_pdist = distance.squareform(distance.pdist(X, metric="euclidean"))
+        lens2 = mapper.fit_transform(X_pdist)
+
+        np.testing.assert_array_equal(lens, lens2)
+
+    def test_sparse_array(self):
         mapper = KeplerMapper()
 
-        groups = {"a": [1], "b":[2]}
+        data = sparse.random(100, 10)
+        lens = mapper.fit_transform(data)
 
-        res = dict()
-        links = mapper._create_links(groups, res)
-
-        assert res == links
-
-
-class TestCover():
-    def test_cube_count(self):
-        data = np.arange(30).reshape(10,3)
-        c = Cover(data, nr_cubes=10)
-        cubes = c.cubes
-
-        assert len(cubes) == 10**3
-
-    def test_cube_dim(self):
-
-        data = np.arange(30).reshape(10,3)
-        c = Cover(data, nr_cubes=10)
-        cubes = c.cubes
-
-        assert all( len(cube) == 3 for cube in cubes)
-
-    def test_single_dim(self):
-        data = np.arange(10).reshape(10,1)
-        c = Cover(data, nr_cubes=10)
-        cubes = c.cubes
-
-        assert all( len(cube) == 1 for cube in cubes)
-
-    def test_chunk_dist(self):
-        data = np.arange(100).reshape(10,10)
-
-        cover = Cover(data, nr_cubes=10)
-        chunks = list(cover.chunk_dist)
-
-        assert all(i == 9 for i in chunks)
-
-    def test_nr_dimensions(self):
-        data = np.arange(30).reshape(10,3)
-
-        c = Cover(data, nr_cubes=10)
-
-        assert c.nr_dimensions == 3
-
-    def test_bound_is_min(self):
-        data = np.arange(100).reshape(10,10)
-
-        c = Cover(data, nr_cubes=10)
-
-        bounds = zip(c.d, range(10))
-        assert all(b[0] == b[1] for b in bounds)
-
-    def test_entries_even(self):
-        data = np.arange(20).reshape(20,1)
-
-        cover = Cover(data, nr_cubes=10)
-        cubes = cover._cube_coordinates_all()
-
-        for cube in cubes:
-            entries = cover.find_entries(data, cube)
-
-            assert len(entries) >= 2
-
-    def test_entries_in_correct_cubes(self):
-        data = np.arange(20).reshape(20,1)
-
-        cover = Cover(data, nr_cubes=10)
-        cubes = cover._cube_coordinates_all()
-
-        entries = [cover.find_entries(data, cube) for cube in cubes]
-
-        # inside of each cube is there. Sometimes the edges don't line up.
-        for i in range(10):
-            assert data[2*i] in entries[i]
-            assert data[2*i+1] in entries[i]
-
-    def test_cubes_overlap(self):
-        data = np.arange(20).reshape(20,1)
-
-        cover = Cover(data, nr_cubes=10)
-        cubes = cover._cube_coordinates_all()
-
-        entries = []
-        for cube in cubes:
-            # turn singleton lists into individual elements
-            res = [i[0] for i in cover.find_entries(data, cube)]
-            entries.append(res)
-
-        for i,j in zip(range(9), range(1,10)):
-            assert set(entries[i]).union(set(entries[j]))
-
-
-class TestLens():
-    # TODO: most of these tests only accomodate the default option. They need to be extended to incorporate all possible transforms.
     def test_lens_size(self):
         mapper = KeplerMapper()
 
@@ -179,18 +210,125 @@ class TestLens():
         # I think that map currently requires fit_transform to be called first
         mapper = KeplerMapper()
         data = np.random.rand(100, 2)
-        #import pdb; pdb.set_trace()
         graph = mapper.map(data)
         assert graph["meta_data"]["projection"] == "custom"
         assert graph["meta_data"]["scaler"] == "None"
 
-    def test_projection(self):
-        atol = 0.1 # accomodate scaling, values are in (0,1), but will be scaled slightly
-
+    def test_project_sklearn_class(self):
         mapper = KeplerMapper()
         data = np.random.rand(100, 5)
-        lens = mapper.fit_transform(data, projection=[0,1])
-        np.testing.assert_allclose(lens, data[:,:2], atol=atol)
+        lens = mapper.project(data, projection=PCA(n_components=1), scaler=None)
 
-        lens = mapper.fit_transform(data, projection=[0])
-        np.testing.assert_allclose(lens, data[:,:1], atol=atol)
+        pca = PCA(n_components=1)
+        lens_confirm = pca.fit_transform(data)
+        assert lens.shape == (100, 1)
+        np.testing.assert_array_equal(lens, lens_confirm)
+
+    def test_tuple_projection(self):
+        mapper = KeplerMapper()
+        data = np.random.rand(100, 5)
+        y = np.random.rand(100, 1)
+        lasso = Lasso()
+        lasso.fit(data, y)
+        lens = mapper.project(data, projection=(lasso, data), scaler=None)
+
+        # hard to test this, at least it doesn't fail
+        assert lens.shape == (100, 1)
+        np.testing.assert_array_equal(lens, lasso.predict(data).reshape((100, 1)))
+
+    def test_tuple_projection_fit(self):
+        mapper = KeplerMapper()
+        data = np.random.rand(100, 5)
+        y = np.random.rand(100, 1)
+        lens = mapper.project(data, projection=(Lasso(), data, y), scaler=None)
+
+        # hard to test this, at least it doesn't fail
+        assert lens.shape == (100, 1)
+
+    def test_projection_without_pipeline(self):
+        # accomodate scaling, values are in (0,1), but will be scaled slightly
+        atol = 0.1
+
+        mapper = KeplerMapper(verbose=1)
+        data = np.random.rand(100, 5)
+        lens = mapper.project(data, projection=[0, 1])
+        np.testing.assert_allclose(lens, data[:, :2], atol=atol)
+
+        lens = mapper.project(data, projection=[0])
+        np.testing.assert_allclose(lens, data[:, :1], atol=atol)
+
+    def test_pipeline(self):
+        # TODO: break this test into many smaller ones.
+        input_data = np.array([[1, 2], [3, 4], [5, 6], [7, 8]], np.float64)
+        atol_big = 0.1
+        atol_small = 0.001
+
+        mapper = KeplerMapper()
+
+        lens_1 = mapper.fit_transform(
+            input_data, projection=[[0, 1], "sum"], scaler=None
+        )
+        expected_output_1 = np.array([[3], [7], [11], [15]])
+
+        lens_2 = mapper.fit_transform(input_data, projection=[[0, 1], "sum"])
+        expected_output_2 = np.array([[0], [0.33], [0.66], [1.]])
+
+        lens_3 = mapper.fit_transform(
+            input_data, projection=[[0, 1], "mean"], scaler=None
+        )
+        expected_output_3 = np.array([[1.5], [3.5], [5.5], [7.5]])
+
+        lens_4 = mapper.fit_transform(input_data, projection=[[1], "mean"], scaler=None)
+        expected_output_4 = np.array([[2], [4], [6], [8]])
+
+        lens_5 = mapper.fit_transform(
+            input_data,
+            projection=[[0, 1], "l2norm"],
+            scaler=None,
+            distance_matrix=[False, "pearson"],
+        )
+        expected_output_5 = np.array([[2.236], [5.], [7.81], [10.630]])
+
+        lens_6 = mapper.fit_transform(
+            input_data,
+            projection=[[0, 1], [0, 1]],
+            scaler=None,
+            distance_matrix=[False, "cosine"],
+        )
+        expected_output_6 = np.array(
+            [[0., 0.016], [0.016, 0.], [0.026, 0.0013], [0.032, 0.0028]]
+        )
+
+        lens_7 = mapper.fit_transform(
+            input_data,
+            projection=[[0, 1], "l2norm"],
+            scaler=None,
+            distance_matrix=[False, "cosine"],
+        )
+        expected_output_7 = np.array([[0.044894], [0.01643], [0.026617], [0.032508]])
+
+        lens_8 = mapper.fit_transform(input_data, projection=[[0, 1], "sum"])
+        lens_9 = mapper.fit_transform(input_data, projection="sum")
+
+        lens_10 = mapper.fit_transform(
+            input_data, projection="sum", scaler=StandardScaler()
+        )
+        lens_11 = mapper.fit_transform(
+            input_data, projection=[[0, 1], "sum"], scaler=[None, StandardScaler()]
+        )
+        expected_output_10 = np.array(
+            [[-1.341641], [-0.447214], [0.447214], [1.341641]]
+        )
+
+        np.testing.assert_array_equal(lens_1, expected_output_1)
+        np.testing.assert_allclose(lens_2, expected_output_2, atol=atol_big)
+        np.testing.assert_array_equal(lens_3, expected_output_3)
+        np.testing.assert_array_equal(lens_4, expected_output_4)
+        np.testing.assert_allclose(lens_5, expected_output_5, atol=atol_small)
+        np.testing.assert_allclose(lens_6, expected_output_6, atol=atol_small)
+        np.testing.assert_allclose(lens_7, expected_output_7, atol=atol_small)
+        np.testing.assert_allclose(lens_8, lens_9, atol=atol_small)
+        np.testing.assert_allclose(lens_10, expected_output_10, atol=atol_small)
+        np.testing.assert_array_equal(lens_10, lens_11)
+        assert not np.array_equal(lens_10, lens_2)
+        assert not np.array_equal(lens_10, lens_1)
